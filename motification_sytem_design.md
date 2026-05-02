@@ -572,3 +572,118 @@ GET /api/v1/templates
 **Status:** Stage 5 Advanced features ready ✅
 **Files:** `notification_app_be/server.js`, `notification_app_be/rateLimiter.js`, `notification_app_be/templates.js`
 **Features:** Rate limiting, templates, advanced search, API protection
+
+### Stage 6: Priority Inbox with Scoring and Max-Heap
+
+#### Priority Scoring Algorithm
+
+- **Multi-factor Scoring**: Notifications scored based on priority level, type importance, recency, and read status
+- **Priority Weights**:
+  - Urgent: 4 points, High: 3 points, Medium: 2 points, Low: 1 point
+  - Placement/Interview: 3 points, Selection/Rejection/Event: 2 points, Announcement: 1 point
+- **Recency Boost**: Newer notifications get higher scores with linear decay over 24 hours
+- **Read Status Bonus**: Unread notifications receive +1 point boost
+- **Urgent Multiplier**: Urgent notifications get 1.5x score multiplier
+
+#### Max-Heap Data Structure
+
+- **Efficient Retrieval**: O(log n) insertion, O(1) max extraction for highest priority notifications
+- **Memory Efficient**: Only stores notification references, not full objects
+- **Dynamic Ordering**: Heap maintains order as new notifications are added
+- **Scalable**: Handles large notification volumes without performance degradation
+
+#### Priority Inbox Features
+
+- **Smart Ordering**: Notifications automatically sorted by calculated priority scores
+- **Top-N Retrieval**: Get the most important N notifications (default 20, configurable)
+- **Real-time Updates**: Priority scores update as notifications age and status changes
+- **User-specific**: Each user gets personalized priority ordering
+
+#### API Endpoints
+
+- **Priority Inbox**:
+
+```
+GET /api/v1/notifications/:userId/priority-inbox?limit=20
+
+Response (200 OK):
+{
+  "success": true,
+  "data": {
+    "notifications": [
+      {
+        "id": "notif_...",
+        "userId": "user-123",
+        "type": "placement",
+        "title": "Job Offer from Tech Corp",
+        "message": "...",
+        "priority": "urgent",
+        "isRead": false,
+        "createdAt": "2026-05-02T10:30:00Z",
+        "priorityScore": 7.2
+      }
+    ],
+    "totalAvailable": 150,
+    "returnedCount": 20
+  },
+  "timestamp": "2026-05-02T10:30:00Z"
+}
+```
+
+- **Priority Statistics**:
+
+```
+GET /api/v1/notifications/:userId/priority-stats
+
+Response (200 OK):
+{
+  "success": true,
+  "data": {
+    "total": 150,
+    "unread": 23,
+    "byPriority": {
+      "urgent": 5,
+      "high": 15,
+      "medium": 45,
+      "low": 85
+    },
+    "byType": {
+      "placement": 20,
+      "interview": 30,
+      "selection": 25,
+      "rejection": 15,
+      "event": 35,
+      "announcement": 25
+    }
+  },
+  "timestamp": "2026-05-02T10:30:00Z"
+}
+```
+
+#### Performance Optimizations
+
+- **Heap-based Sorting**: O(n log k) complexity for top-k retrieval vs O(n log n) for full sort
+- **Lazy Evaluation**: Priority scores calculated only when inbox is requested
+- **Memory Bounds**: Reasonable limits prevent excessive memory usage
+- **Caching Integration**: Priority results can be cached for frequently accessed users
+
+#### User Experience Benefits
+
+- **Important First**: Users see critical notifications (urgent, unread, recent) at the top
+- **Reduced Noise**: Less important announcements don't clutter the inbox
+- **Efficient Browsing**: Smart ordering reduces time spent finding relevant notifications
+- **Personalized**: Each user's priority preferences reflected in ordering
+
+### Next Steps (Stage 6)
+
+- Priority inbox implementation
+- Max-heap data structure optimization
+- Advanced scoring algorithms
+- User preference-based prioritization
+- Machine learning-based priority prediction
+
+---
+
+**Status:** Stage 6 Priority inbox ready ✅
+**Files:** `notification_app_be/server.js`, `notification_app_be/priorityInbox.js`
+**Features:** Priority scoring, max-heap sorting, priority inbox API, statistics dashboard
