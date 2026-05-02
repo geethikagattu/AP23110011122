@@ -286,9 +286,7 @@ All endpoints return errors in this format:
   "error": {
     "code": "ERROR_CODE (e.g., VALIDATION_ERROR, NOT_FOUND, UNAUTHORIZED, INTERNAL_ERROR)",
     "message": "Human-readable error message",
-    "details": {
-      /* optional validation details */
-    }
+    "details": { /* optional validation details */ }
   },
   "timestamp": "2026-05-02T10:30:00Z"
 }
@@ -305,25 +303,81 @@ All endpoints return errors in this format:
 | `event`        | Campus events           | low, medium       |
 | `announcement` | General announcements   | low, medium       |
 
-### Key Design Decisions
+### Stage 2: Database Design and Scaling
 
-1. **Async Response (202 Accepted)** for `notify-all` to prevent timeout on bulk operations
-2. **WebSocket over polling** for real-time to reduce server load and network traffic
-3. **Pagination mandatory** for GET endpoints to prevent database overload
-4. **Immutable IDs** generated server-side for audit trails
-5. **Metadata object** for extensibility without schema changes
-6. **Priority field** for Stage 6 priority inbox implementation
-7. **Expiration support** for time-sensitive notifications
+#### Database Choice
 
-### Next Steps (Stage 2)
+- **MongoDB** is chosen for its flexible document schema, fast writes, and ability to support notification payloads with optional metadata.
+- It also supports efficient sharding by `userId` and a TTL index for `expiresAt`.
 
-- Database schema with indexes
-- User authentication & authorization
-- Data persistence
-- Query optimization strategies
+#### Notification Collection Schema
+
+- `userId: string` — required, indexed
+- `type: string` — required, enum
+- `title: string` — required
+- `message: string` — required
+- `priority: string` — enum, default `medium`
+- `isRead: boolean` — default `false`
+- `expiresAt: Date` — optional TTL cleanup
+- `metadata: object` — optional extensibility
+- `createdAt`, `updatedAt` — timestamps
+
+#### Index Strategy
+
+- `userId + createdAt DESC` for paginated per-user reads
+- `expiresAt` TTL index for automatic deletion of expired notifications
+
+#### Scaling Problems + Solutions
+
+- **High write volume**: use MongoDB replica sets and horizontal sharding by `userId`
+- **Large result sets**: use pagination with `skip`/`limit` and compound indexes
+- **Stale notifications**: TTL index for `expiresAt` removes old entries automatically
+- **Hot users**: add caching at Stage 4 for frequently-read users
+- **Traffic spikes**: separate write path and read path via replica set read preferences
+
+#### Query Examples
+
+```js
+// Fetch user notifications with filters and pagination
+Notification.find({ userId, type, priority, isRead })
+  .sort({ createdAt: -1 })
+  .skip((page - 1) * limit)
+  .limit(limit);
+
+// Mark a notification read
+Notification.findByIdAndUpdate(notificationId, { isRead: true, updatedAt: new Date() }, { new: true });
+
+// Bulk mark notifications read
+Notification.updateMany(
+  { _id: { $in: notificationIds }, userId },
+  { isRead: true, updatedAt: new Date() }
+);
+
+// Delete expired notifications (automatic via TTL)
+```
+
+### Real-Time Updates
+
+Stage 2 keeps the WebSocket subscription model. The server broadcasts:
+- `notification:new`
+- `notification:read`
+- `notification:deleted`
+
+### Environment
+
+- `PORT`
+- `DB_CONNECTION_STRING`
+- `EVALUATION_SERVICE_TOKEN`
+
+### Next Steps (Stage 3)
+
+- Slow query analysis and index tuning
+- Add prioritization scoring
+- Introduce Redis caching and lazy loading
+- Build reliable async queue processing
 
 ---
 
-**Status:** Stage 1 API Complete ✅
-**Files:** `notification_app_be/server.js`, `notification_app_be/schemas.js`
-**Implementation:** Production-ready with logging integration
+**Status:** Stage 2 Design and persistence ready ✅
+**Files:** `notification_app_be/server.js`, `notification_app_be/models/notificationModel.js`, `notification_app_be/db.js`
+**Implementation:** MongoDB persistence with WebSocket delivery

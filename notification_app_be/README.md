@@ -1,34 +1,31 @@
-# Notification Service - Stage 1: REST API Design
+# Notification Service - Stage 2: MongoDB Persistence
 
-Production-ready REST API for campus notifications with real-time WebSocket support.
+Production-ready notification microservice for campus notifications with MongoDB persistence and WebSocket real-time delivery.
 
 ## Features
 
 ✅ **REST API Endpoints** — CRUD operations for notifications
+✅ **MongoDB Persistence** — Notification storage with indexing and pagination
 ✅ **Real-time WebSocket** — Live notification delivery to connected clients
-✅ **Pagination & Filtering** — Efficient data retrieval
-✅ **Async Job Queue** — Bulk operations (Stage 5 ready)
-✅ **Structured Schemas** — JSON request/response validation
-✅ **Integrated Logging** — All operations logged to evaluation service
+✅ **Filtering & Sorting** — Efficient query support for type, priority, and read status
+✅ **Async Job Support** — Bulk notify-all job pattern
+✅ **Integrated Logging** — Logs sent to evaluation service via shared middleware
 
 ## Setup
 
 ### Installation
-
 ```bash
 npm install
 cp .env.example .env
-# Edit .env with your configuration
+# Edit .env with your MongoDB connection string and auth token
 ```
 
 ### Development
-
 ```bash
 npm run dev
 ```
 
 ### Production
-
 ```bash
 npm start
 ```
@@ -44,7 +41,7 @@ npm start
 | PATCH  | `/api/v1/notifications/:notificationId` | Mark as read                        |
 | DELETE | `/api/v1/notifications/:notificationId` | Delete notification                 |
 | POST   | `/api/v1/notifications/bulk/mark-read`  | Bulk mark as read                   |
-| POST   | `/api/v1/notifications/notify-all`      | Send to all users (async)           |
+| POST   | `/api/v1/notifications/notify-all`      | Send notification to many users     |
 | GET    | `/api/v1/notifications/job/:jobId`      | Check async job status              |
 
 ### Health
@@ -53,100 +50,65 @@ npm start
 | ------ | --------- | -------------------- |
 | GET    | `/health` | Service health check |
 
-## JSON Schemas
+## Database Integration
 
-See `schemas.js` for complete request/response documentation:
+### MongoDB Schema
 
-- Notification object structure
-- Request body formats
-- Pagination format
-- WebSocket event formats
-- Error responses
+The service stores notifications in MongoDB using a schema optimized for user-specific reads and expiration:
+
+- `userId` — string, indexed for fast user queries
+- `type` — enum: placement, interview, selection, rejection, event, announcement
+- `title` — string, required
+- `message` — string, required
+- `priority` — enum: low, medium, high, urgent
+- `isRead` — boolean, default false
+- `expiresAt` — date, optional TTL cleanup
+- `metadata` — object for extensible payload
+- `createdAt`, `updatedAt` — auto timestamps
+
+### Indexing Strategy
+
+- `userId + createdAt` for paginated user notification retrieval
+- `expiresAt` TTL index for auto cleanup of stale messages
+
+### Query Examples
+
+```js
+// User notification list
+Notification.find({ userId })
+  .sort({ createdAt: -1 })
+  .skip((page - 1) * limit)
+  .limit(limit);
+
+// Bulk mark read
+Notification.updateMany(
+  { _id: { $in: notificationIds }, userId },
+  { isRead: true, updatedAt: new Date() },
+);
+```
 
 ## Real-Time Updates (WebSocket)
 
-### Connection
+The same WebSocket subscription model remains in Stage 2. Users subscribe with their `userId`, and the service pushes:
 
-```javascript
-const ws = new WebSocket("ws://localhost:5000");
+- `notification:new`
+- `notification:read`
+- `notification:deleted`
 
-ws.onopen = () => {
-  ws.send(
-    JSON.stringify({
-      type: "subscribe",
-      userId: "user-123",
-    }),
-  );
-};
-```
+## Environment Variables
 
-### Events Received
+- `PORT`
+- `EVALUATION_SERVICE_TOKEN`
+- `DB_CONNECTION_STRING`
 
-```javascript
-// New notification received
-{
-  event: "notification:new",
-  data: { /* notification object */ },
-  timestamp: "2026-05-02T10:30:00Z"
-}
+## Notes
 
-// Notification marked as read
-{
-  event: "notification:read",
-  data: {
-    notificationId: "notif_...",
-    userId: "user-123"
-  }
-}
-
-// Notification deleted
-{
-  event: "notification:deleted",
-  data: {
-    notificationId: "notif_...",
-    userId: "user-123"
-  }
-}
-```
-
-## Authentication
-
-Currently using Bearer token from `EVALUATION_SERVICE_TOKEN` environment variable. All logs include this token.
-
-**TODO Stage 2+:** Add user authentication middleware.
-
-## Database Integration
-
-Currently mocked. Implementation in **Stage 2**:
-
-- MongoDB connection
-- Schema design
-- Indexing strategy
-
-## Caching & Performance
-
-**TODO Stage 4:**
-
-- Redis caching for frequent queries
-- Lazy loading for notification lists
-- Pagination optimization
-
-## Async Operations
-
-**TODO Stage 5:**
-
-- Bull queue for notify-all jobs
-- Retry logic
-- Separate workers for email/DB/push
+- `.env` is ignored and should never be committed.
+- `notification_app_be/.env.example` provides a safe template.
 
 ## Next Stages
 
-- **Stage 2:** Database schema & optimization
-- **Stage 3:** Query optimization & indexing
-- **Stage 4:** Caching strategy & pagination
-- **Stage 5:** Async queue & reliability
-- **Stage 6:** Priority Inbox with heap
-
----
-
-**Status:** Stage 1 Complete ✅ (Ready for Stage 2: DB Schema)
+- **Stage 3:** Query optimization, indexing, and slow query fix
+- **Stage 4:** Redis caching and lazy loading
+- **Stage 5:** Reliable async queue and retry handling
+- **Stage 6:** Priority inbox with scoring and max-heap

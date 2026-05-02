@@ -1,59 +1,55 @@
 /**
- * STAGE 1: Notification Service REST API
- * Production-ready server with WebSocket real-time support
+ * STAGE 2: Notification Service with MongoDB persistence
  */
 
+require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
 const Log = require("../logging_middleware/logger");
-require("dotenv").config();
+const loggerMiddleware = require("../logging_middleware/middleware");
+const { connectDatabase } = require("./db");
+const Notification = require("./models/notificationModel");
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
-
 const PORT = process.env.PORT || 5000;
 
-// =====================================================
-// MIDDLEWARE
-// =====================================================
-app.use(express.json());
+const validTypes = ["placement", "interview", "selection", "rejection", "event", "announcement"];
+const validPriorities = ["low", "medium", "high", "urgent"];
 
-// Add logger middleware
-const loggerMiddleware = require("../logging_middleware/middleware");
+app.use(express.json());
 app.use(loggerMiddleware);
 
-// =====================================================
-// WEBSOCKET REAL-TIME HANDLER
-// =====================================================
+const userConnections = new Map();
 
-const userConnections = new Map(); // Map<userId, Set<WebSocket>>
+function broadcastToUser(userId, payload) {
+  const connections = userConnections.get(userId);
+  if (!connections) return;
+  const message = JSON.stringify(payload);
+  connections.forEach((ws) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(message);
+    }
+  });
+}
 
 wss.on("connection", (ws) => {
   console.log("[WebSocket] New connection");
   let userId = null;
 
-  // Client sends auth message first
   ws.on("message", async (data) => {
     try {
       const message = JSON.parse(data);
-
-      // Auth: Subscribe to user's notifications
       if (message.type === "subscribe" && message.userId) {
         userId = message.userId;
-
         if (!userConnections.has(userId)) {
           userConnections.set(userId, new Set());
         }
         userConnections.get(userId).add(ws);
 
-        await Log(
-          "backend",
-          "info",
-          "service",
-          `User ${userId} subscribed to notifications`,
-        );
+        await Log("backend", "info", "service", `User ${userId} subscribed to notifications`);
         ws.send(
           JSON.stringify({
             event: "subscribed",
@@ -79,34 +75,11 @@ wss.on("connection", (ws) => {
   });
 });
 
-// =====================================================
-// REST API ENDPOINTS - STAGE 1
-// =====================================================
-
-/**
- * POST /api/v1/notifications
- * Create a new notification
- */
 app.post("/api/v1/notifications", async (req, res) => {
   try {
-    const {
-      userId,
-      type,
-      title,
-      message,
-      priority = "medium",
-      expiresAt,
-      metadata,
-    } = req.body;
-
-    // Validation
+    const { userId, type, title, message, priority = "medium", expiresAt, metadata } = req.body;
     if (!userId || !type || !title || !message) {
-      await Log(
-        "backend",
-        "warn",
-        "handler",
-        "Missing required fields in notification creation",
-      );
+      await Log("backend", "warn", "handler", "Missing required fields in notification creation");
       return res.status(400).json({
         success: false,
         error: {
@@ -117,14 +90,6 @@ app.post("/api/v1/notifications", async (req, res) => {
       });
     }
 
-    const validTypes = [
-      "placement",
-      "interview",
-      "selection",
-      "rejection",
-      "event",
-      "announcement",
-    ];
     if (!validTypes.includes(type)) {
       return res.status(400).json({
         success: false,
@@ -136,57 +101,41 @@ app.post("/api/v1/notifications", async (req, res) => {
       });
     }
 
-    // Mock: Create notification object
-    const notification = {
-      id: `notif_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    if (!validPriorities.includes(priority)) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: "VALIDATION_ERROR",
+          message: `Invalid priority. Must be one of: ${validPriorities.join(", ")}`,
+        },
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const notification = await Notification.create({
       userId,
       type,
       title,
       message,
       priority,
-      isRead: false,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      expiresAt,
+      expiresAt: expiresAt ? new Date(expiresAt) : undefined,
       metadata: metadata || {},
-    };
+    });
 
-    // TODO: Save to database (Stage 2)
+    broadcastToUser(userId, {
+      event: "notification:new",
+      data: notification,
+      timestamp: new Date().toISOString(),
+    });
 
-    // Broadcast to connected user via WebSocket
-    if (userConnections.has(userId)) {
-      const event = JSON.stringify({
-        event: "notification:new",
-        data: notification,
-        timestamp: new Date().toISOString(),
-      });
-
-      userConnections.get(userId).forEach((ws) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(event);
-        }
-      });
-    }
-
-    await Log(
-      "backend",
-      "info",
-      "handler",
-      `Notification created for user ${userId}`,
-    );
-
+    await Log("backend", "info", "handler", `Notification created for user ${userId}`);
     res.status(201).json({
       success: true,
       data: notification,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    await Log(
-      "backend",
-      "error",
-      "handler",
-      `Notification creation failed: ${err.message}`,
-    );
+    await Log("backend", "error", "handler", `Notification creation failed: ${err.message}`);
     res.status(500).json({
       success: false,
       error: {
@@ -198,44 +147,43 @@ app.post("/api/v1/notifications", async (req, res) => {
   }
 });
 
-/**
- * GET /api/v1/notifications/:userId
- * Fetch paginated notifications for a user
- */
 app.get("/api/v1/notifications/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
-    const { page = 1, limit = 20, filter, sort = "-createdAt" } = req.query;
-
-    await Log(
-      "backend",
-      "info",
-      "handler",
-      `Fetching notifications for user ${userId}`,
-    );
-
-    // TODO: Fetch from database with pagination (Stage 2)
-    // For now, mock response
+    const { page = 1, limit = 20, type, priority, isRead, sort = "-createdAt" } = req.query;
+    const query = { userId };
+    if (type) query.type = type;
+    if (priority) query.priority = priority;
+    if (typeof isRead !== "undefined") {
+      query.isRead = isRead === "true" || isRead === true;
+    }
+    const sortField = sort.startsWith("-") ? sort.slice(1) : sort;
+    const sortOrder = sort.startsWith("-") ? -1 : 1;
+    const sortOptions = { [sortField]: sortOrder };
+    const pageNumber = Math.max(parseInt(page, 10), 1);
+    const pageSize = Math.max(parseInt(limit, 10), 1);
+    const skip = (pageNumber - 1) * pageSize;
+    const [notifications, total] = await Promise.all([
+      Notification.find(query).sort(sortOptions).skip(skip).limit(pageSize),
+      Notification.countDocuments(query),
+    ]);
+    const pages = Math.ceil(total / pageSize);
+    await Log("backend", "info", "handler", `Fetched notifications for user ${userId}`);
     res.status(200).json({
       success: true,
       data: {
-        notifications: [], // TODO: Replace with DB query
+        notifications,
         pagination: {
-          total: 0,
-          page: parseInt(page),
-          limit: parseInt(limit),
-          pages: 0,
+          total,
+          page: pageNumber,
+          limit: pageSize,
+          pages,
         },
       },
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    await Log(
-      "backend",
-      "error",
-      "handler",
-      `Failed to fetch notifications: ${err.message}`,
-    );
+    await Log("backend", "error", "handler", `Failed to fetch notifications: ${err.message}`);
     res.status(500).json({
       success: false,
       error: {
@@ -247,15 +195,10 @@ app.get("/api/v1/notifications/:userId", async (req, res) => {
   }
 });
 
-/**
- * PATCH /api/v1/notifications/:notificationId
- * Mark notification as read
- */
 app.patch("/api/v1/notifications/:notificationId", async (req, res) => {
   try {
     const { notificationId } = req.params;
     const { isRead } = req.body;
-
     if (typeof isRead !== "boolean") {
       return res.status(400).json({
         success: false,
@@ -266,36 +209,37 @@ app.patch("/api/v1/notifications/:notificationId", async (req, res) => {
         timestamp: new Date().toISOString(),
       });
     }
-
-    // TODO: Update in database (Stage 2)
-    const notification = {
-      id: notificationId,
-      isRead,
-      updatedAt: new Date().toISOString(),
-    };
-
-    // Broadcast event to user
-    // TODO: Get userId from notification, then broadcast
-
-    await Log(
-      "backend",
-      "info",
-      "handler",
-      `Notification ${notificationId} marked as read`,
+    const notification = await Notification.findByIdAndUpdate(
+      notificationId,
+      { isRead, updatedAt: new Date() },
+      { new: true },
     );
-
+    if (!notification) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          code: "NOT_FOUND",
+          message: "Notification not found",
+        },
+        timestamp: new Date().toISOString(),
+      });
+    }
+    broadcastToUser(notification.userId, {
+      event: "notification:read",
+      data: {
+        notificationId: notification.id,
+        userId: notification.userId,
+        timestamp: new Date().toISOString(),
+      },
+    });
+    await Log("backend", "info", "handler", `Notification ${notificationId} marked as read`);
     res.status(200).json({
       success: true,
       data: notification,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    await Log(
-      "backend",
-      "error",
-      "handler",
-      `Failed to update notification: ${err.message}`,
-    );
+    await Log("backend", "error", "handler", `Failed to update notification: ${err.message}`);
     res.status(500).json({
       success: false,
       error: {
@@ -307,35 +251,36 @@ app.patch("/api/v1/notifications/:notificationId", async (req, res) => {
   }
 });
 
-/**
- * DELETE /api/v1/notifications/:notificationId
- * Delete a notification
- */
 app.delete("/api/v1/notifications/:notificationId", async (req, res) => {
   try {
     const { notificationId } = req.params;
-
-    // TODO: Delete from database (Stage 2)
-
-    await Log(
-      "backend",
-      "info",
-      "handler",
-      `Notification ${notificationId} deleted`,
-    );
-
+    const notification = await Notification.findByIdAndDelete(notificationId);
+    if (!notification) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          code: "NOT_FOUND",
+          message: "Notification not found",
+        },
+        timestamp: new Date().toISOString(),
+      });
+    }
+    broadcastToUser(notification.userId, {
+      event: "notification:deleted",
+      data: {
+        notificationId: notification.id,
+        userId: notification.userId,
+      },
+      timestamp: new Date().toISOString(),
+    });
+    await Log("backend", "info", "handler", `Notification ${notificationId} deleted`);
     res.status(200).json({
       success: true,
       message: "Notification deleted successfully",
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    await Log(
-      "backend",
-      "error",
-      "handler",
-      `Failed to delete notification: ${err.message}`,
-    );
+    await Log("backend", "error", "handler", `Failed to delete notification: ${err.message}`);
     res.status(500).json({
       success: false,
       error: {
@@ -347,14 +292,9 @@ app.delete("/api/v1/notifications/:notificationId", async (req, res) => {
   }
 });
 
-/**
- * POST /api/v1/notifications/bulk/mark-read
- * Mark multiple notifications as read
- */
 app.post("/api/v1/notifications/bulk/mark-read", async (req, res) => {
   try {
     const { notificationIds, userId } = req.body;
-
     if (!Array.isArray(notificationIds) || !userId) {
       return res.status(400).json({
         success: false,
@@ -365,31 +305,21 @@ app.post("/api/v1/notifications/bulk/mark-read", async (req, res) => {
         timestamp: new Date().toISOString(),
       });
     }
-
-    // TODO: Bulk update in database (Stage 2)
-
-    await Log(
-      "backend",
-      "info",
-      "handler",
-      `Marked ${notificationIds.length} notifications as read for user ${userId}`,
+    const result = await Notification.updateMany(
+      { _id: { $in: notificationIds }, userId },
+      { isRead: true, updatedAt: new Date() },
     );
-
+    await Log("backend", "info", "handler", `Marked ${result.modifiedCount} notifications as read for user ${userId}`);
     res.status(200).json({
       success: true,
       data: {
-        updated: notificationIds.length,
-        failed: 0,
+        updated: result.modifiedCount,
+        failed: notificationIds.length - result.modifiedCount,
       },
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    await Log(
-      "backend",
-      "error",
-      "handler",
-      `Bulk mark-read failed: ${err.message}`,
-    );
+    await Log("backend", "error", "handler", `Bulk mark-read failed: ${err.message}`);
     res.status(500).json({
       success: false,
       error: {
@@ -401,21 +331,9 @@ app.post("/api/v1/notifications/bulk/mark-read", async (req, res) => {
   }
 });
 
-/**
- * POST /api/v1/notifications/notify-all
- * Send notification to all users (async, queued - Stage 5)
- */
 app.post("/api/v1/notifications/notify-all", async (req, res) => {
   try {
-    const {
-      type,
-      title,
-      message,
-      priority = "medium",
-      metadata,
-      targetUsers,
-    } = req.body;
-
+    const { type, title, message, priority = "medium", metadata, targetUsers } = req.body;
     if (!type || !title || !message) {
       return res.status(400).json({
         success: false,
@@ -426,28 +344,43 @@ app.post("/api/v1/notifications/notify-all", async (req, res) => {
         timestamp: new Date().toISOString(),
       });
     }
-
-    // TODO: Queue job (Stage 5: Bull/RabbitMQ)
     const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
+    if (Array.isArray(targetUsers) && targetUsers.length) {
+      const notifications = targetUsers.map((userId) => ({
+        userId,
+        type,
+        title,
+        message,
+        priority,
+        metadata: metadata || {},
+      }));
+      await Notification.insertMany(notifications);
+      targetUsers.forEach((userId) => {
+        broadcastToUser(userId, {
+          event: "notification:new",
+          data: {
+            type,
+            title,
+            message,
+            priority,
+            metadata: metadata || {},
+          },
+          timestamp: new Date().toISOString(),
+        });
+      });
+    }
     await Log("backend", "info", "handler", `Notify-all job queued: ${jobId}`);
-
     res.status(202).json({
       success: true,
       data: {
         jobId,
-        estimatedUsers: targetUsers?.length || "calculating",
+        estimatedUsers: Array.isArray(targetUsers) ? targetUsers.length : "calculating",
         status: "queued",
       },
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    await Log(
-      "backend",
-      "error",
-      "handler",
-      `Notify-all failed: ${err.message}`,
-    );
+    await Log("backend", "error", "handler", `Notify-all failed: ${err.message}`);
     res.status(500).json({
       success: false,
       error: {
@@ -459,16 +392,9 @@ app.post("/api/v1/notifications/notify-all", async (req, res) => {
   }
 });
 
-/**
- * GET /api/v1/notifications/job/:jobId
- * Get status of async job
- */
 app.get("/api/v1/notifications/job/:jobId", async (req, res) => {
   try {
     const { jobId } = req.params;
-
-    // TODO: Query job status from queue (Stage 5)
-
     res.status(200).json({
       success: true,
       data: {
@@ -494,9 +420,6 @@ app.get("/api/v1/notifications/job/:jobId", async (req, res) => {
   }
 });
 
-/**
- * Health check endpoint
- */
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "healthy",
@@ -504,10 +427,6 @@ app.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
-
-// =====================================================
-// ERROR HANDLING
-// =====================================================
 
 app.use((err, req, res, next) => {
   console.error("[Global Error Handler]", err);
@@ -521,14 +440,17 @@ app.use((err, req, res, next) => {
   });
 });
 
-// =====================================================
-// START SERVER
-// =====================================================
-
-server.listen(PORT, () => {
-  console.log(`🚀 Notification Service running on port ${PORT}`);
-  console.log(`📡 WebSocket server ready for real-time updates`);
-  console.log(`✅ Health check: http://localhost:${PORT}/health`);
-});
+connectDatabase()
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log(`🚀 Notification Service running on port ${PORT}`);
+      console.log(`📡 WebSocket server ready for real-time updates`);
+      console.log(`✅ Health check: http://localhost:${PORT}/health`);
+    });
+  })
+  .catch((err) => {
+    console.error("[Startup Error] Failed to connect to database", err);
+    process.exit(1);
+  });
 
 module.exports = server;
