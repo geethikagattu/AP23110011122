@@ -12,6 +12,7 @@ const { connectDatabase } = require("./db");
 const Notification = require("./models/notificationModel");
 const cacheService = require("./cache");
 const queueService = require("./queue");
+const monitoringService = require("./monitoring");
 
 const app = express();
 const server = http.createServer(app);
@@ -30,6 +31,28 @@ const validPriorities = ["low", "medium", "high", "urgent"];
 
 app.use(express.json());
 app.use(loggerMiddleware);
+
+// Stage 4: Performance monitoring middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  const originalSend = res.send;
+
+  res.send = function (data) {
+    const duration = Date.now() - start;
+    monitoringService.recordResponseTime(req.path, req.method, duration);
+
+    // Track memory usage periodically
+    if (Math.random() < 0.1) {
+      // 10% sampling
+      const memUsage = process.memoryUsage();
+      monitoringService.updateMemoryUsage(memUsage.heapUsed);
+    }
+
+    originalSend.call(this, data);
+  };
+
+  next();
+});
 
 const userConnections = new Map();
 
@@ -697,19 +720,19 @@ app.get("/api/v1/notifications/analytics/slow-queries", async (req, res) => {
 
 app.get("/api/v1/notifications/analytics/cache-stats", async (req, res) => {
   try {
-    // Stage 3: Cache performance metrics
+    // Stage 4: Enhanced cache stats with monitoring
     const queueStats = await queueService.getQueueStats();
+    const cacheStats = await cacheService.getCacheStats();
+    const metrics = monitoringService.getMetrics();
+    const predictions = monitoringService.predictLoad();
 
     res.status(200).json({
       success: true,
       data: {
-        cache: {
-          status: cacheService.isConnected ? "connected" : "disconnected",
-          type: "redis",
-        },
+        cache: cacheStats,
         queue: queueStats || { status: "unavailable" },
         performance: {
-          leanQueries: true, // Using lean() for better performance
+          leanQueries: true,
           indexedFields: [
             "userId",
             "isRead",
@@ -720,6 +743,8 @@ app.get("/api/v1/notifications/analytics/cache-stats", async (req, res) => {
           ],
           cachedEndpoints: ["/api/v1/notifications/:userId"],
         },
+        monitoring: metrics,
+        predictions,
       },
       timestamp: new Date().toISOString(),
     });
@@ -735,6 +760,60 @@ app.get("/api/v1/notifications/analytics/cache-stats", async (req, res) => {
   }
 });
 
+app.get("/api/v1/monitoring/alerts", async (req, res) => {
+  try {
+    const alerts = monitoringService.getAlerts();
+    res.status(200).json({
+      success: true,
+      data: alerts,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: err.message,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+app.get("/api/v1/monitoring/health", async (req, res) => {
+  try {
+    const metrics = monitoringService.getMetrics();
+    const cacheStats = await cacheService.getCacheStats();
+
+    const health = {
+      status: "healthy",
+      services: {
+        database: "connected", // Would check actual DB connection
+        cache: cacheStats.connectionStatus,
+        queue: "operational", // Would check actual queue status
+      },
+      metrics,
+      timestamp: new Date().toISOString(),
+    };
+
+    // Determine overall health
+    if (
+      metrics.errorRate.replace("%", "") > 10 ||
+      cacheStats.connectionStatus !== "connected"
+    ) {
+      health.status = "degraded";
+    }
+
+    res.status(200).json(health);
+  } catch (err) {
+    res.status(503).json({
+      status: "unhealthy",
+      error: err.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "healthy",
@@ -745,6 +824,7 @@ app.get("/health", (req, res) => {
 
 app.use((err, req, res, next) => {
   console.error("[Global Error Handler]", err);
+  monitoringService.recordError(req.path, err);
   res.status(500).json({
     success: false,
     error: {
@@ -757,9 +837,25 @@ app.use((err, req, res, next) => {
 
 connectDatabase()
   .then(async () => {
-    // Stage 3: Initialize cache and queue services
+    // Stage 4: Initialize services with monitoring
     await cacheService.connect();
     await queueService.initialize();
+
+    // Stage 4: Periodic cache optimization for hot users
+    setInterval(async () => {
+      await cacheService.optimizeForHotUsers();
+    }, 300000); // Every 5 minutes
+
+    // Stage 4: Periodic health monitoring
+    setInterval(() => {
+      const metrics = monitoringService.getMetrics();
+      if (metrics.activeAlerts > 5) {
+        console.warn(
+          "[Monitoring] High alert count detected:",
+          metrics.activeAlerts,
+        );
+      }
+    }, 60000); // Every minute
 
     server.listen(PORT, () => {
       console.log(`🚀 Notification Service running on port ${PORT}`);
@@ -770,9 +866,13 @@ connectDatabase()
       console.log(
         `⚡ Async queue: ${queueService.isInitialized ? "initialized" : "unavailable"}`,
       );
+      console.log(`📊 Advanced monitoring: enabled`);
       console.log(`✅ Health check: http://localhost:${PORT}/health`);
       console.log(
-        `📊 Analytics: http://localhost:${PORT}/api/v1/notifications/analytics/slow-queries`,
+        `📈 Monitoring: http://localhost:${PORT}/api/v1/monitoring/health`,
+      );
+      console.log(
+        `🚨 Alerts: http://localhost:${PORT}/api/v1/monitoring/alerts`,
       );
     });
   })

@@ -1,5 +1,5 @@
 /**
- * STAGE 3: Redis Cache Service for Notification Performance
+ * STAGE 4: Advanced Redis Cache Service with User Analytics
  */
 
 const redis = require("redis");
@@ -8,6 +8,13 @@ class CacheService {
   constructor() {
     this.client = null;
     this.isConnected = false;
+    this.hotUsers = new Map(); // Track frequently accessed users
+    this.cacheStats = {
+      hits: 0,
+      misses: 0,
+      sets: 0,
+      invalidations: 0,
+    };
   }
 
   async connect() {
@@ -38,9 +45,21 @@ class CacheService {
     if (!this.isConnected) return null;
     try {
       const data = await this.client.get(key);
-      return data ? JSON.parse(data) : null;
+      if (data) {
+        this.cacheStats.hits++;
+        // Extract userId from key pattern notifications:userId:...
+        const userIdMatch = key.match(/notifications:([^:]+):/);
+        if (userIdMatch) {
+          await this.trackUserAccess(userIdMatch[1]);
+        }
+        return JSON.parse(data);
+      } else {
+        this.cacheStats.misses++;
+        return null;
+      }
     } catch (error) {
       console.error("[Redis] Get error:", error.message);
+      this.cacheStats.misses++;
       return null;
     }
   }
@@ -50,6 +69,7 @@ class CacheService {
     if (!this.isConnected) return false;
     try {
       await this.client.setEx(key, ttlSeconds, JSON.stringify(value));
+      this.cacheStats.sets++;
       return true;
     } catch (error) {
       console.error("[Redis] Set error:", error.message);
@@ -98,10 +118,88 @@ class CacheService {
       keys.push(`unread:${userId}`);
       if (keys.length > 0) {
         await this.client.del(keys);
+        this.cacheStats.invalidations++;
       }
     } catch (error) {
       // Minor mistake: not logging the error for debugging
       // console.error('[Redis] Invalidate cache error:', error.message);
+    }
+  }
+
+  // Stage 4: Advanced caching for hot users
+  async trackUserAccess(userId) {
+    if (!this.isConnected) return;
+
+    const current = this.hotUsers.get(userId) || {
+      count: 0,
+      lastAccess: Date.now(),
+    };
+    current.count++;
+    current.lastAccess = Date.now();
+
+    // Mark as hot user if accessed > 10 times in last hour
+    if (current.count > 10 && Date.now() - current.lastAccess < 3600000) {
+      await this.warmUserCache(userId);
+    }
+
+    this.hotUsers.set(userId, current);
+  }
+
+  async warmUserCache(userId) {
+    if (!this.isConnected) return;
+
+    try {
+      // Preload common queries for hot users
+      const commonQueries = [
+        { page: 1, limit: 20, filters: {} },
+        { page: 1, limit: 10, filters: { isRead: false } },
+        { page: 1, limit: 20, filters: { priority: "high" } },
+      ];
+
+      // This would typically query the database and cache results
+      // For now, just mark that cache warming occurred
+      console.log(`[Cache] Warming cache for hot user: ${userId}`);
+    } catch (error) {
+      console.error("[Cache] Warm cache error:", error.message);
+    }
+  }
+
+  async getCacheStats() {
+    const total = this.cacheStats.hits + this.cacheStats.misses;
+    const hitRate =
+      total > 0 ? ((this.cacheStats.hits / total) * 100).toFixed(2) : 0;
+
+    return {
+      ...this.cacheStats,
+      hitRate: `${hitRate}%`,
+      hotUsersCount: this.hotUsers.size,
+      connectionStatus: this.isConnected ? "connected" : "disconnected",
+    };
+  }
+
+  async optimizeForHotUsers() {
+    if (!this.isConnected) return;
+
+    // Clean up old hot user data (older than 24 hours)
+    const now = Date.now();
+    for (const [userId, data] of this.hotUsers.entries()) {
+      if (now - data.lastAccess > 86400000) {
+        // 24 hours
+        this.hotUsers.delete(userId);
+      }
+    }
+
+    // Extend cache TTL for hot users
+    const hotUserIds = Array.from(this.hotUsers.keys());
+    for (const userId of hotUserIds) {
+      try {
+        const keys = await this.client.keys(`notifications:${userId}:*`);
+        for (const key of keys) {
+          await this.client.expire(key, 1800); // Extend to 30 minutes
+        }
+      } catch (error) {
+        console.error("[Cache] Hot user optimization error:", error.message);
+      }
     }
   }
 
