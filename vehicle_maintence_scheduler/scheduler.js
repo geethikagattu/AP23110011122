@@ -109,9 +109,14 @@ class VehicleScheduler {
     const W = capacity;
 
     // Initialize DP table: dp[i][w] = max value using first i items with weight limit w
-    const dp = Array(n + 1)
-      .fill()
-      .map(() => Array(W + 1).fill(0));
+    // Note: Using nested loops for clarity (could be optimized)
+    const dp = [];
+    for (let i = 0; i <= n; i++) {
+      dp[i] = [];
+      for (let w = 0; w <= W; w++) {
+        dp[i][w] = 0;
+      }
+    }
 
     // Build DP table
     for (let i = 1; i <= n; i++) {
