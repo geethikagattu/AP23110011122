@@ -1,0 +1,25 @@
+{
+  "name": "vehicle-maintenance-scheduler",
+  "version": "1.0.0",
+  "description": "Vehicle maintenance task scheduling using 0/1 knapsack optimization algorithm",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "schedule": "node index.js",
+    "test": "node -c scheduler.js && echo '✅ Syntax check passed'"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.6.1"
+  },
+  "keywords": [
+    "vehicle-maintenance",
+    "scheduling",
+    "knapsack",
+    "optimization",
+    "depot",
+    "mechanic-hours"
+  ],
+  "author": "Vehicle Maintenance Team",
+  "license": "MIT"
+}

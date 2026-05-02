@@ -1,0 +1,122 @@
+{
+  "generatedAt": "2026-05-02T06:52:24.615Z",
+  "summary": {
+    "totalDepots": 3,
+    "totalTasks": 10,
+    "totalSelectedTasks": 10,
+    "totalImpact": 150,
+    "totalMechanicHours": 120,
+    "totalHoursUsed": 78
+  },
+  "depots": {
+    "depot-1": {
+      "depotId": "depot-1",
+      "mechanicHours": 40,
+      "totalTasks": 4,
+      "selectedTasks": 4,
+      "selectedTaskIds": [
+        "task-1",
+        "task-2",
+        "task-3",
+        "task-4"
+      ],
+      "totalImpact": 58,
+      "totalDuration": 30,
+      "remainingHours": 10,
+      "tasks": [
+        {
+          "taskId": "task-1",
+          "depotId": "depot-1",
+          "duration": 8,
+          "impact": 15
+        },
+        {
+          "taskId": "task-2",
+          "depotId": "depot-1",
+          "duration": 6,
+          "impact": 10
+        },
+        {
+          "taskId": "task-3",
+          "depotId": "depot-1",
+          "duration": 12,
+          "impact": 25
+        },
+        {
+          "taskId": "task-4",
+          "depotId": "depot-1",
+          "duration": 4,
+          "impact": 8
+        }
+      ]
+    },
+    "depot-2": {
+      "depotId": "depot-2",
+      "mechanicHours": 35,
+      "totalTasks": 3,
+      "selectedTasks": 3,
+      "selectedTaskIds": [
+        "task-5",
+        "task-6",
+        "task-7"
+      ],
+      "totalImpact": 41,
+      "totalDuration": 22,
+      "remainingHours": 13,
+      "tasks": [
+        {
+          "taskId": "task-5",
+          "depotId": "depot-2",
+          "duration": 10,
+          "impact": 20
+        },
+        {
+          "taskId": "task-6",
+          "depotId": "depot-2",
+          "duration": 7,
+          "impact": 12
+        },
+        {
+          "taskId": "task-7",
+          "depotId": "depot-2",
+          "duration": 5,
+          "impact": 9
+        }
+      ]
+    },
+    "depot-3": {
+      "depotId": "depot-3",
+      "mechanicHours": 45,
+      "totalTasks": 3,
+      "selectedTasks": 3,
+      "selectedTaskIds": [
+        "task-8",
+        "task-9",
+        "task-10"
+      ],
+      "totalImpact": 51,
+      "totalDuration": 26,
+      "remainingHours": 19,
+      "tasks": [
+        {
+          "taskId": "task-8",
+          "depotId": "depot-3",
+          "duration": 9,
+          "impact": 18
+        },
+        {
+          "taskId": "task-9",
+          "depotId": "depot-3",
+          "duration": 11,
+          "impact": 22
+        },
+        {
+          "taskId": "task-10",
+          "depotId": "depot-3",
+          "duration": 6,
+          "impact": 11
+        }
+      ]
+    }
+  }
+}
