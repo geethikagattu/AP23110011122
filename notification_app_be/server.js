@@ -1,5 +1,5 @@
 /**
- * STAGE 3: Notification Service with Redis Caching and Async Queues
+ * STAGE 6: Notification Service with Priority Inbox and Max-Heap Scoring
  */
 
 require("dotenv").config();
@@ -15,6 +15,7 @@ const queueService = require("./queue");
 const monitoringService = require("./monitoring");
 const rateLimiter = require("./rateLimiter");
 const templateService = require("./templates");
+const priorityInboxService = require("./priorityInbox");
 
 const app = express();
 const server = http.createServer(app);
@@ -1040,6 +1041,105 @@ app.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// STAGE 6: Priority Inbox with Scoring and Max-Heap
+app.get(
+  "/api/v1/notifications/:userId/priority-inbox",
+  rateLimiter.checkLimit("analytics"),
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const limit = parseInt(req.query.limit) || 20;
+
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          error: "User ID is required",
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      const result = await priorityInboxService.buildPriorityInbox(
+        userId,
+        limit,
+      );
+
+      if (!result.success) {
+        return res.status(500).json({
+          success: false,
+          error: result.error,
+          details: result.details,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        data: result.data,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error("[Priority Inbox Error]", error);
+      monitoringService.recordError(
+        "/api/v1/notifications/:userId/priority-inbox",
+        error,
+      );
+      res.status(500).json({
+        success: false,
+        error: "Failed to retrieve priority inbox",
+        details: error.message,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  },
+);
+
+app.get(
+  "/api/v1/notifications/:userId/priority-stats",
+  rateLimiter.checkLimit("analytics"),
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          error: "User ID is required",
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      const result = await priorityInboxService.getPriorityStats(userId);
+
+      if (!result.success) {
+        return res.status(500).json({
+          success: false,
+          error: result.error,
+          details: result.details,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        data: result.data,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error("[Priority Stats Error]", error);
+      monitoringService.recordError(
+        "/api/v1/notifications/:userId/priority-stats",
+        error,
+      );
+      res.status(500).json({
+        success: false,
+        error: "Failed to retrieve priority statistics",
+        details: error.message,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  },
+);
 
 app.use((err, req, res, next) => {
   console.error("[Global Error Handler]", err);
