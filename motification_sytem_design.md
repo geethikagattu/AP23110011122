@@ -484,15 +484,91 @@ GET /api/v1/notifications/analytics/cache-stats - Enhanced cache metrics
 - **Smart Invalidation**: Targeted cache clearing for affected users
 - **Performance Metrics**: Cache hit rates, connection status, hot user counts
 
-### Next Steps (Stage 4)
+### Stage 5: Advanced Features and API Enhancement
 
-- Advanced caching for frequently-read users
-- Performance monitoring and alerting
-- Predictive analytics and load forecasting
-- Health checks and service monitoring
+#### Rate Limiting Protection
+
+- **Multi-tier Limits**: Different limits for notifications (100/min), bulk operations (10/5min), analytics (50/5min)
+- **User-based Tracking**: Rate limits applied per user ID with sliding window
+- **HTTP Headers**: Standard rate limit headers (`X-RateLimit-Remaining`, `X-RateLimit-Reset`)
+- **Automatic Cleanup**: Periodic cleanup of expired rate limit data
+
+#### Notification Templates System
+
+- **Predefined Templates**: Ready-to-use templates for common scenarios (interviews, placements, events)
+- **Variable Substitution**: Dynamic content replacement with `{{variable}}` syntax
+- **Type Inference**: Automatic notification type detection from template ID
+- **Validation**: Required variable checking before template rendering
+
+Available Templates:
+
+- `interview-scheduled` - Interview scheduling notifications
+- `interview-reminder` - Interview reminder alerts
+- `placement-offer` - Job offer congratulations
+- `placement-rejection` - Application status updates
+- `event-announcement` - Campus event notifications
+- `selection-shortlisted` - Selection confirmations
+
+#### Advanced Search and Filtering
+
+- **Full-text Search**: Search across title and message content
+- **Date Range Filtering**: Filter notifications by creation date range
+- **Complex Queries**: Combine multiple filters (type, priority, read status, date)
+- **Flexible Sorting**: Sort by any field with priority score support
+
+#### API Enhancement Features
+
+- **Template-based Creation**: Create notifications from predefined templates
+
+```
+POST /api/v1/notifications/from-template
+{
+  "templateId": "interview-scheduled",
+  "userId": "user-123",
+  "variables": {
+    "companyName": "Tech Corp",
+    "date": "2026-05-15",
+    "time": "10:00 AM"
+  }
+}
+```
+
+- **Advanced Search Endpoint**:
+
+```
+POST /api/v1/notifications/search
+{
+  "userId": "user-123",
+  "query": "interview",
+  "type": "interview",
+  "dateFrom": "2026-01-01",
+  "dateTo": "2026-12-31"
+}
+```
+
+- **Template Discovery**:
+
+```
+GET /api/v1/templates
+```
+
+#### Security and Performance
+
+- **Rate Limit Enforcement**: Automatic request throttling with 429 responses
+- **Input Validation**: Comprehensive validation for all template variables
+- **Error Handling**: Detailed error messages for template and search failures
+- **Resource Protection**: Prevents API abuse through intelligent rate limiting
+
+### Next Steps (Stage 5)
+
+- Rate limiting and API protection
+- Notification templates system
+- Advanced search and filtering
+- API versioning and backward compatibility
+- User personalization features
 
 ---
 
-**Status:** Stage 4 Advanced caching and monitoring ready ✅
-**Files:** `notification_app_be/server.js`, `notification_app_be/cache.js`, `notification_app_be/monitoring.js`
-**Features:** Hot user caching, performance monitoring, predictive analytics, health alerting
+**Status:** Stage 5 Advanced features ready ✅
+**Files:** `notification_app_be/server.js`, `notification_app_be/rateLimiter.js`, `notification_app_be/templates.js`
+**Features:** Rate limiting, templates, advanced search, API protection

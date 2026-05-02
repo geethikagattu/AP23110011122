@@ -13,6 +13,8 @@ const Notification = require("./models/notificationModel");
 const cacheService = require("./cache");
 const queueService = require("./queue");
 const monitoringService = require("./monitoring");
+const rateLimiter = require("./rateLimiter");
+const templateService = require("./templates");
 
 const app = express();
 const server = http.createServer(app);
@@ -50,6 +52,38 @@ app.use((req, res, next) => {
 
     originalSend.call(this, data);
   };
+
+  next();
+});
+
+// Stage 5: Rate limiting middleware
+app.use((req, res, next) => {
+  // Extract user ID from various sources (header, query, body)
+  const userId =
+    req.headers["x-user-id"] ||
+    req.query.userId ||
+    (req.body && req.body.userId) ||
+    "anonymous";
+
+  const rateLimitResult = rateLimiter.checkLimit(userId, req.path);
+
+  if (!rateLimitResult.allowed) {
+    return res.status(429).json({
+      success: false,
+      error: {
+        code: "RATE_LIMIT_EXCEEDED",
+        message: "Too many requests. Please try again later.",
+        retryAfter: rateLimitResult.retryAfter,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  // Add rate limit headers
+  res.set({
+    "X-RateLimit-Remaining": rateLimitResult.remaining,
+    "X-RateLimit-Reset": rateLimitResult.resetTime,
+  });
 
   next();
 });
@@ -814,6 +848,191 @@ app.get("/api/v1/monitoring/health", async (req, res) => {
   }
 });
 
+app.post("/api/v1/notifications/from-template", async (req, res) => {
+  try {
+    const { templateId, userId, variables } = req.body;
+
+    if (!templateId || !userId) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "templateId and userId required",
+        },
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // Stage 5: Create notification from template
+    const notificationData = templateService.createFromTemplate(
+      templateId,
+      userId,
+      variables || {},
+    );
+
+    const notification = await Notification.create(notificationData);
+
+    broadcastToUser(userId, {
+      event: "notification:new",
+      data: notification,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Invalidate cache
+    await cacheService.invalidateUserCache(userId);
+
+    await Log(
+      "backend",
+      "info",
+      "handler",
+      `Template notification created for user ${userId} using ${templateId}`,
+    );
+    res.status(201).json({
+      success: true,
+      data: notification,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    await Log(
+      "backend",
+      "error",
+      "handler",
+      `Template notification creation failed: ${err.message}`,
+    );
+    res.status(400).json({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: err.message,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+app.get("/api/v1/templates", async (req, res) => {
+  try {
+    // Stage 5: Get available notification templates
+    const templates = templateService.getAllTemplates();
+
+    res.status(200).json({
+      success: true,
+      data: templates,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: err.message,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+app.post("/api/v1/notifications/search", async (req, res) => {
+  try {
+    const {
+      userId,
+      query,
+      type,
+      priority,
+      isRead,
+      dateFrom,
+      dateTo,
+      sort = "-createdAt",
+      page = 1,
+      limit = 20,
+    } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "userId required",
+        },
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // Stage 5: Advanced search with text query
+    let searchQuery = { userId };
+
+    // Add filters
+    if (type) searchQuery.type = type;
+    if (priority) searchQuery.priority = priority;
+    if (typeof isRead !== "undefined") searchQuery.isRead = isRead;
+
+    // Date range filter
+    if (dateFrom || dateTo) {
+      searchQuery.createdAt = {};
+      if (dateFrom) searchQuery.createdAt.$gte = new Date(dateFrom);
+      if (dateTo) searchQuery.createdAt.$lte = new Date(dateTo);
+    }
+
+    // Text search in title and message
+    if (query) {
+      searchQuery.$or = [
+        { title: { $regex: query, $options: "i" } },
+        { message: { $regex: query, $options: "i" } },
+      ];
+    }
+
+    const pageNumber = Math.max(parseInt(page, 10), 1);
+    const pageSize = Math.max(parseInt(limit, 10), 1);
+    const skip = (pageNumber - 1) * pageSize;
+
+    const [notifications, total] = await Promise.all([
+      Notification.find(searchQuery).sort(sort).skip(skip).limit(pageSize),
+      Notification.countDocuments(searchQuery),
+    ]);
+
+    const pages = Math.ceil(total / pageSize);
+
+    await Log(
+      "backend",
+      "info",
+      "handler",
+      `Advanced search returned ${notifications.length} notifications for user ${userId}`,
+    );
+    res.status(200).json({
+      success: true,
+      data: {
+        notifications,
+        pagination: {
+          total,
+          page: pageNumber,
+          limit: pageSize,
+          pages,
+        },
+        searchQuery: {
+          query,
+          filters: { type, priority, isRead, dateFrom, dateTo },
+        },
+      },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    await Log(
+      "backend",
+      "error",
+      "handler",
+      `Advanced search failed: ${err.message}`,
+    );
+    res.status(500).json({
+      success: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: err.message,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "healthy",
@@ -857,6 +1076,11 @@ connectDatabase()
       }
     }, 60000); // Every minute
 
+    // Stage 5: Periodic cleanup tasks
+    setInterval(() => {
+      rateLimiter.cleanup();
+    }, 300000); // Clean up rate limits every 5 minutes
+
     server.listen(PORT, () => {
       console.log(`🚀 Notification Service running on port ${PORT}`);
       console.log(`📡 WebSocket server ready for real-time updates`);
@@ -867,13 +1091,15 @@ connectDatabase()
         `⚡ Async queue: ${queueService.isInitialized ? "initialized" : "unavailable"}`,
       );
       console.log(`📊 Advanced monitoring: enabled`);
+      console.log(`🚦 Rate limiting: active`);
+      console.log(
+        `📝 Templates: ${templateService.getAllTemplates().length} available`,
+      );
       console.log(`✅ Health check: http://localhost:${PORT}/health`);
       console.log(
-        `📈 Monitoring: http://localhost:${PORT}/api/v1/monitoring/health`,
+        `🔍 Search: http://localhost:${PORT}/api/v1/notifications/search`,
       );
-      console.log(
-        `🚨 Alerts: http://localhost:${PORT}/api/v1/monitoring/alerts`,
-      );
+      console.log(`📋 Templates: http://localhost:${PORT}/api/v1/templates`);
     });
   })
   .catch((err) => {
