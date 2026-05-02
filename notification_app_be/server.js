@@ -1,5 +1,5 @@
 /**
- * STAGE 2: Notification Service with MongoDB persistence
+ * STAGE 3: Notification Service with Redis Caching and Async Queues
  */
 
 require("dotenv").config();
@@ -10,13 +10,22 @@ const Log = require("../logging_middleware/logger");
 const loggerMiddleware = require("../logging_middleware/middleware");
 const { connectDatabase } = require("./db");
 const Notification = require("./models/notificationModel");
+const cacheService = require("./cache");
+const queueService = require("./queue");
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 const PORT = process.env.PORT || 5000;
 
-const validTypes = ["placement", "interview", "selection", "rejection", "event", "announcement"];
+const validTypes = [
+  "placement",
+  "interview",
+  "selection",
+  "rejection",
+  "event",
+  "announcement",
+];
 const validPriorities = ["low", "medium", "high", "urgent"];
 
 app.use(express.json());
@@ -49,7 +58,12 @@ wss.on("connection", (ws) => {
         }
         userConnections.get(userId).add(ws);
 
-        await Log("backend", "info", "service", `User ${userId} subscribed to notifications`);
+        await Log(
+          "backend",
+          "info",
+          "service",
+          `User ${userId} subscribed to notifications`,
+        );
         ws.send(
           JSON.stringify({
             event: "subscribed",
@@ -77,9 +91,22 @@ wss.on("connection", (ws) => {
 
 app.post("/api/v1/notifications", async (req, res) => {
   try {
-    const { userId, type, title, message, priority = "medium", expiresAt, metadata } = req.body;
+    const {
+      userId,
+      type,
+      title,
+      message,
+      priority = "medium",
+      expiresAt,
+      metadata,
+    } = req.body;
     if (!userId || !type || !title || !message) {
-      await Log("backend", "warn", "handler", "Missing required fields in notification creation");
+      await Log(
+        "backend",
+        "warn",
+        "handler",
+        "Missing required fields in notification creation",
+      );
       return res.status(400).json({
         success: false,
         error: {
@@ -128,14 +155,24 @@ app.post("/api/v1/notifications", async (req, res) => {
       timestamp: new Date().toISOString(),
     });
 
-    await Log("backend", "info", "handler", `Notification created for user ${userId}`);
+    await Log(
+      "backend",
+      "info",
+      "handler",
+      `Notification created for user ${userId}`,
+    );
     res.status(201).json({
       success: true,
       data: notification,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    await Log("backend", "error", "handler", `Notification creation failed: ${err.message}`);
+    await Log(
+      "backend",
+      "error",
+      "handler",
+      `Notification creation failed: ${err.message}`,
+    );
     res.status(500).json({
       success: false,
       error: {
@@ -150,40 +187,127 @@ app.post("/api/v1/notifications", async (req, res) => {
 app.get("/api/v1/notifications/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
-    const { page = 1, limit = 20, type, priority, isRead, sort = "-createdAt" } = req.query;
+    const {
+      page = 1,
+      limit = 20,
+      type,
+      priority,
+      isRead,
+      sort = "-priorityScore,-createdAt",
+    } = req.query;
+
+    // Build query filters
     const query = { userId };
     if (type) query.type = type;
     if (priority) query.priority = priority;
     if (typeof isRead !== "undefined") {
       query.isRead = isRead === "true" || isRead === true;
     }
-    const sortField = sort.startsWith("-") ? sort.slice(1) : sort;
-    const sortOrder = sort.startsWith("-") ? -1 : 1;
-    const sortOptions = { [sortField]: sortOrder };
+
+    // Parse sort parameter (support priorityScore sorting)
+    let sortOptions = {};
+    if (sort.includes("priorityScore")) {
+      const sortFields = sort.split(",");
+      sortFields.forEach((field) => {
+        const sortField = field.startsWith("-") ? field.slice(1) : field;
+        const sortOrder = field.startsWith("-") ? -1 : 1;
+        sortOptions[sortField] = sortOrder;
+      });
+    } else {
+      // Fallback to createdAt sorting
+      const sortField = sort.startsWith("-") ? sort.slice(1) : sort;
+      const sortOrder = sort.startsWith("-") ? -1 : 1;
+      sortOptions = { [sortField]: sortOrder };
+    }
+
     const pageNumber = Math.max(parseInt(page, 10), 1);
     const pageSize = Math.max(parseInt(limit, 10), 1);
     const skip = (pageNumber - 1) * pageSize;
+
+    // Try cache first (Stage 3 optimization)
+    const cacheKey = { page: pageNumber, limit: pageSize, filters: query };
+    let cachedResult = await cacheService.getUserNotifications(
+      userId,
+      pageNumber,
+      pageSize,
+      query,
+    );
+
+    if (cachedResult) {
+      await Log(
+        "backend",
+        "info",
+        "cache",
+        `Cache hit for user ${userId} notifications`,
+      );
+      return res.status(200).json({
+        success: true,
+        data: cachedResult,
+        cached: true,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // Cache miss - query database
     const [notifications, total] = await Promise.all([
-      Notification.find(query).sort(sortOptions).skip(skip).limit(pageSize),
+      Notification.find(query)
+        .sort(sortOptions)
+        .skip(skip)
+        .limit(pageSize)
+        .lean(), // Use lean() for better performance
       Notification.countDocuments(query),
     ]);
+
+    // Update access tracking for performance analysis
+    if (notifications.length > 0) {
+      await Notification.updateMany(
+        { _id: { $in: notifications.map((n) => n._id) } },
+        {
+          $inc: { accessCount: 1 },
+          $set: { lastAccessed: new Date() },
+        },
+      );
+    }
+
     const pages = Math.ceil(total / pageSize);
-    await Log("backend", "info", "handler", `Fetched notifications for user ${userId}`);
+    const result = {
+      notifications,
+      pagination: {
+        total,
+        page: pageNumber,
+        limit: pageSize,
+        pages,
+      },
+    };
+
+    // Cache the result (Stage 3 optimization)
+    await cacheService.setUserNotifications(
+      userId,
+      pageNumber,
+      pageSize,
+      query,
+      result,
+    );
+
+    await Log(
+      "backend",
+      "info",
+      "handler",
+      `Fetched ${notifications.length} notifications for user ${userId}`,
+    );
     res.status(200).json({
       success: true,
-      data: {
-        notifications,
-        pagination: {
-          total,
-          page: pageNumber,
-          limit: pageSize,
-          pages,
-        },
-      },
+      data: result,
+      cached: false,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    await Log("backend", "error", "handler", `Failed to fetch notifications: ${err.message}`);
+    await Log(
+      "backend",
+      "error",
+      "handler",
+      `Failed to fetch notifications: ${err.message}`,
+    );
     res.status(500).json({
       success: false,
       error: {
@@ -232,14 +356,28 @@ app.patch("/api/v1/notifications/:notificationId", async (req, res) => {
         timestamp: new Date().toISOString(),
       },
     });
-    await Log("backend", "info", "handler", `Notification ${notificationId} marked as read`);
+
+    // Invalidate user cache (Stage 3 optimization)
+    await cacheService.invalidateUserCache(notification.userId);
+
+    await Log(
+      "backend",
+      "info",
+      "handler",
+      `Notification ${notificationId} marked as read`,
+    );
     res.status(200).json({
       success: true,
       data: notification,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    await Log("backend", "error", "handler", `Failed to update notification: ${err.message}`);
+    await Log(
+      "backend",
+      "error",
+      "handler",
+      `Failed to update notification: ${err.message}`,
+    );
     res.status(500).json({
       success: false,
       error: {
@@ -273,14 +411,24 @@ app.delete("/api/v1/notifications/:notificationId", async (req, res) => {
       },
       timestamp: new Date().toISOString(),
     });
-    await Log("backend", "info", "handler", `Notification ${notificationId} deleted`);
+    await Log(
+      "backend",
+      "info",
+      "handler",
+      `Notification ${notificationId} deleted`,
+    );
     res.status(200).json({
       success: true,
       message: "Notification deleted successfully",
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    await Log("backend", "error", "handler", `Failed to delete notification: ${err.message}`);
+    await Log(
+      "backend",
+      "error",
+      "handler",
+      `Failed to delete notification: ${err.message}`,
+    );
     res.status(500).json({
       success: false,
       error: {
@@ -309,7 +457,16 @@ app.post("/api/v1/notifications/bulk/mark-read", async (req, res) => {
       { _id: { $in: notificationIds }, userId },
       { isRead: true, updatedAt: new Date() },
     );
-    await Log("backend", "info", "handler", `Marked ${result.modifiedCount} notifications as read for user ${userId}`);
+
+    // Invalidate user cache (Stage 3 optimization)
+    await cacheService.invalidateUserCache(userId);
+
+    await Log(
+      "backend",
+      "info",
+      "handler",
+      `Marked ${result.modifiedCount} notifications as read for user ${userId}`,
+    );
     res.status(200).json({
       success: true,
       data: {
@@ -319,7 +476,12 @@ app.post("/api/v1/notifications/bulk/mark-read", async (req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    await Log("backend", "error", "handler", `Bulk mark-read failed: ${err.message}`);
+    await Log(
+      "backend",
+      "error",
+      "handler",
+      `Bulk mark-read failed: ${err.message}`,
+    );
     res.status(500).json({
       success: false,
       error: {
@@ -333,7 +495,14 @@ app.post("/api/v1/notifications/bulk/mark-read", async (req, res) => {
 
 app.post("/api/v1/notifications/notify-all", async (req, res) => {
   try {
-    const { type, title, message, priority = "medium", metadata, targetUsers } = req.body;
+    const {
+      type,
+      title,
+      message,
+      priority = "medium",
+      metadata,
+      targetUsers,
+    } = req.body;
     if (!type || !title || !message) {
       return res.status(400).json({
         success: false,
@@ -344,8 +513,10 @@ app.post("/api/v1/notifications/notify-all", async (req, res) => {
         timestamp: new Date().toISOString(),
       });
     }
-    const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    if (Array.isArray(targetUsers) && targetUsers.length) {
+
+    // Stage 3: Use async queue for bulk operations
+    if (Array.isArray(targetUsers) && targetUsers.length > 10) {
+      // For large batches, use async queue processing
       const notifications = targetUsers.map((userId) => ({
         userId,
         type,
@@ -353,34 +524,96 @@ app.post("/api/v1/notifications/notify-all", async (req, res) => {
         message,
         priority,
         metadata: metadata || {},
+        createdAt: new Date(),
+        updatedAt: new Date(),
       }));
-      await Notification.insertMany(notifications);
-      targetUsers.forEach((userId) => {
-        broadcastToUser(userId, {
-          event: "notification:new",
-          data: {
-            type,
-            title,
-            message,
-            priority,
-            metadata: metadata || {},
-          },
-          timestamp: new Date().toISOString(),
+
+      const jobId = await queueService.addBulkNotificationJob(notifications, {
+        targetUsers,
+        broadcastData: {
+          type,
+          title,
+          message,
+          priority,
+          metadata: metadata || {},
+        },
+      });
+
+      await Log(
+        "backend",
+        "info",
+        "handler",
+        `Large bulk notification job queued: ${jobId}`,
+      );
+      res.status(202).json({
+        success: true,
+        data: {
+          jobId,
+          estimatedUsers: targetUsers.length,
+          status: "queued",
+          processing: "async",
+        },
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      // For small batches, process synchronously
+      const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      if (Array.isArray(targetUsers) && targetUsers.length) {
+        const notifications = targetUsers.map((userId) => ({
+          userId,
+          type,
+          title,
+          message,
+          priority,
+          metadata: metadata || {},
+        }));
+        await Notification.insertMany(notifications);
+
+        // Invalidate cache for all affected users
+        for (const userId of targetUsers) {
+          await cacheService.invalidateUserCache(userId);
+        }
+
+        targetUsers.forEach((userId) => {
+          broadcastToUser(userId, {
+            event: "notification:new",
+            data: {
+              type,
+              title,
+              message,
+              priority,
+              metadata: metadata || {},
+            },
+            timestamp: new Date().toISOString(),
+          });
         });
+      }
+      await Log(
+        "backend",
+        "info",
+        "handler",
+        `Small bulk notification job completed: ${jobId}`,
+      );
+      res.status(202).json({
+        success: true,
+        data: {
+          jobId,
+          estimatedUsers: Array.isArray(targetUsers)
+            ? targetUsers.length
+            : "calculating",
+          status: "completed",
+          processing: "sync",
+        },
+        timestamp: new Date().toISOString(),
       });
     }
-    await Log("backend", "info", "handler", `Notify-all job queued: ${jobId}`);
-    res.status(202).json({
-      success: true,
-      data: {
-        jobId,
-        estimatedUsers: Array.isArray(targetUsers) ? targetUsers.length : "calculating",
-        status: "queued",
-      },
-      timestamp: new Date().toISOString(),
-    });
   } catch (err) {
-    await Log("backend", "error", "handler", `Notify-all failed: ${err.message}`);
+    await Log(
+      "backend",
+      "error",
+      "handler",
+      `Notify-all failed: ${err.message}`,
+    );
     res.status(500).json({
       success: false,
       error: {
@@ -395,15 +628,97 @@ app.post("/api/v1/notifications/notify-all", async (req, res) => {
 app.get("/api/v1/notifications/job/:jobId", async (req, res) => {
   try {
     const { jobId } = req.params;
+
+    // Stage 3: Get real job status from queue service
+    const jobStatus = await queueService.getJobStatus(jobId);
+
+    if (!jobStatus) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          code: "NOT_FOUND",
+          message: "Job not found",
+        },
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: jobStatus,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: err.message,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+app.get("/api/v1/notifications/analytics/slow-queries", async (req, res) => {
+  try {
+    // Stage 3: Slow query analysis endpoint
+    const analysis = await Notification.analyzeSlowQueries();
+
     res.status(200).json({
       success: true,
       data: {
-        jobId,
-        status: "processing",
-        progress: {
-          processed: 0,
-          total: 0,
-          percentage: 0,
+        analysis,
+        totalQueries: analysis.length,
+        recommendations: analysis.map((item) => ({
+          userId: item._id.userId,
+          type: item._id.type,
+          count: item.count,
+          avgAccessCount: Math.round(item.avgAccessCount * 100) / 100,
+          suggestion:
+            item.count > 100
+              ? "Consider caching this query pattern"
+              : "Query pattern is optimal",
+        })),
+      },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: err.message,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+app.get("/api/v1/notifications/analytics/cache-stats", async (req, res) => {
+  try {
+    // Stage 3: Cache performance metrics
+    const queueStats = await queueService.getQueueStats();
+
+    res.status(200).json({
+      success: true,
+      data: {
+        cache: {
+          status: cacheService.isConnected ? "connected" : "disconnected",
+          type: "redis",
+        },
+        queue: queueStats || { status: "unavailable" },
+        performance: {
+          leanQueries: true, // Using lean() for better performance
+          indexedFields: [
+            "userId",
+            "isRead",
+            "priorityScore",
+            "type",
+            "expiresAt",
+            "lastAccessed",
+          ],
+          cachedEndpoints: ["/api/v1/notifications/:userId"],
         },
       },
       timestamp: new Date().toISOString(),
@@ -441,11 +756,24 @@ app.use((err, req, res, next) => {
 });
 
 connectDatabase()
-  .then(() => {
+  .then(async () => {
+    // Stage 3: Initialize cache and queue services
+    await cacheService.connect();
+    await queueService.initialize();
+
     server.listen(PORT, () => {
       console.log(`🚀 Notification Service running on port ${PORT}`);
       console.log(`📡 WebSocket server ready for real-time updates`);
+      console.log(
+        `🔄 Redis cache: ${cacheService.isConnected ? "connected" : "disconnected"}`,
+      );
+      console.log(
+        `⚡ Async queue: ${queueService.isInitialized ? "initialized" : "unavailable"}`,
+      );
       console.log(`✅ Health check: http://localhost:${PORT}/health`);
+      console.log(
+        `📊 Analytics: http://localhost:${PORT}/api/v1/notifications/analytics/slow-queries`,
+      );
     });
   })
   .catch((err) => {
